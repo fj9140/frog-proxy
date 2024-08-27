@@ -1,2 +1,9 @@
+package frogproxy
 
-func NewProxyHttpServer() *ProxyHttpServer {}
+type ProxyHttpServer struct{}
+
+func NewProxyHttpServer() *ProxyHttpServer {
+	proxy := ProxyHttpServer{}
+
+	return &proxy
+}
