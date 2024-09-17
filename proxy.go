@@ -1,6 +1,7 @@
 package frogproxy
 
 import (
+	"bufio"
 	"io"
 	"log"
 	"net"
@@ -50,6 +51,27 @@ func copyHeaders(dst, src http.Header, keepDestHeaders bool) {
 			dst.Add(k, v)
 		}
 	}
+}
+
+func isEof(r *bufio.Reader) bool {
+	_, err := r.Peek(1)
+	if err == io.EOF {
+		return true
+	}
+	return false
+
+}
+func removeProxyHeaders(ctx *ProxyCtx, r *http.Request) {
+	r.RequestURI = ""
+	ctx.Logf("Sending request to %v %v", r.Method, r.URL.String())
+	r.Header.Del("Accept-Encoding")
+	r.Header.Del("Proxy-Connection")
+	r.Header.Del("Proxy-Authenticate")
+	r.Header.Del("Proxy-Authorization")
+	if r.Header.Get("Connection") == "close" {
+		r.Close = false
+	}
+	r.Header.Del("Connection")
 }
 
 func (proxy *ProxyHttpServer) filterRequest(r *http.Request, ctx *ProxyCtx) (req *http.Request, resp *http.Response) {

@@ -9,6 +9,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync/atomic"
 )
@@ -30,6 +32,7 @@ type ConnectAction struct {
 var (
 	OKConnect   = &ConnectAction{Action: ConnectAccept, TLSConfig: TLSConfigFromCA(&FrogproxyCa)}
 	MitmConnect = &ConnectAction{Action: ConnectMitm, TLSConfig: TLSConfigFromCA(&FrogproxyCa)}
+	httpRegexp  = regexp.MustCompile(`^https:\/\/`)
 )
 
 func copyAndClose(ctx *ProxyCtx, dst, src halfClosable) {
@@ -89,9 +92,15 @@ func (proxy *ProxyHttpServer) handleHttps(w http.ResponseWriter, r *http.Request
 	ctx.Logf("Running %d CONNECT handlers", len(proxy.httpsHandlers))
 
 	todo, host := OKConnect, r.URL.Host
-	// for i,h:=range proxy.httpsHandlers{
+	for i, h := range proxy.httpsHandlers {
+		newtodo, newhost := h.HandleConnect(host, ctx)
 
-	// }
+		if newtodo != nil {
+			todo, host = newtodo, newhost
+			ctx.Logf("on %dth handler: %v %s", i, todo, host)
+			break
+		}
+	}
 
 	switch todo.Action {
 	case ConnectAccept:
@@ -114,6 +123,114 @@ func (proxy *ProxyHttpServer) handleHttps(w http.ResponseWriter, r *http.Request
 			go copyAndClose(ctx, proxyClientTCP, targetTCP)
 		} else {
 		}
+	case ConnectMitm:
+		proxyClient.Write([]byte("HTTP/1.1 200 OK\r\n\r\n"))
+		ctx.Logf("Assuming CONNECT is TLS, mitm proxing it")
+
+		tlsConfig := defaultTLSConfig
+		if todo.TLSConfig != nil {
+			var err error
+			tlsConfig, err = todo.TLSConfig(host, ctx)
+			if err != nil {
+				httpError(proxyClient, ctx, err)
+				return
+			}
+		}
+
+		go func() {
+			rawClientTls := tls.Server(proxyClient, tlsConfig)
+			defer rawClientTls.Close()
+			if err := rawClientTls.Handshake(); err != nil {
+				ctx.Warnf("Cannot handshake client %v %v", r.Host, err)
+				return
+			}
+			clientTlsReader := bufio.NewReader(rawClientTls)
+			for !isEof(clientTlsReader) {
+				req, err := http.ReadRequest(clientTlsReader)
+				var ctx = &ProxyCtx{Req: req, Session: atomic.AddInt64(&proxy.sess, 1), Proxy: proxy, UserData: ctx.UserData}
+				if err != nil && err != io.EOF {
+					return
+				}
+				if err != nil {
+					ctx.Warnf("Cannot read TLS request from mitm'd client %v %v", r.Host, err)
+					return
+				}
+				req.RemoteAddr = r.RemoteAddr
+				ctx.Logf("req %v", r.Host)
+
+				if !httpRegexp.MatchString(req.URL.String()) {
+					req.URL, err = url.Parse("https://" + r.Host + req.URL.String())
+				}
+
+				ctx.Req = req
+
+				req, resp := proxy.filterRequest(req, ctx)
+				if resp == nil {
+					if err != nil {
+						if req.URL != nil {
+							ctx.Warnf("Illegal URL %s", "https://"+r.Host+req.URL.Path)
+						} else {
+							ctx.Warnf("Illegal URL %s", "https://"+r.Host)
+						}
+						return
+					}
+					removeProxyHeaders(ctx, req)
+					resp, err = func() (*http.Response, error) {
+						defer req.Body.Close()
+						return ctx.Proxy.Tr.RoundTrip(req)
+					}()
+					if err != nil {
+						ctx.Warnf("Cannot read TLS response from mitm'd server %v", err)
+						return
+					}
+					ctx.Logf("resp %v", resp.Status)
+				}
+				resp = proxy.filterResponse(resp, ctx)
+				defer resp.Body.Close()
+
+				text := resp.Status
+				statusCode := strconv.Itoa(resp.StatusCode)
+				text = strings.TrimPrefix(text, statusCode)
+				if _, err := io.WriteString(rawClientTls, "HTTP/1.1 "+statusCode+text+"\r\n"); err != nil {
+					ctx.Warnf("Cannot write TLS response HTTP status from mitm'd client %v", err)
+					return
+				}
+
+				if resp.Request.Method == "HEAD" {
+				} else {
+					resp.Header.Del("Content-Length")
+					resp.Header.Set("Transfer-Encoding", "chunked")
+				}
+				resp.Header.Set("Connection", "close")
+				if err := resp.Header.Write(rawClientTls); err != nil {
+					ctx.Warnf("Cannot write TLS response header from mitm'd client: %v", err)
+					return
+				}
+				if _, err = io.WriteString(rawClientTls, "\r\n"); err != nil {
+					ctx.Warnf("Cannot write TLS response header from mitm'd client: %v", err)
+					return
+				}
+
+				if resp.Request.Method == "HEAD" {
+
+				} else {
+					chunked := newChunkedWriter(rawClientTls)
+					if _, err := io.Copy(chunked, resp.Body); err != nil {
+						ctx.Warnf("Cannot write TLS response body from mitm'd client: %v", err)
+						return
+					}
+					if err := chunked.Close(); err != nil {
+						ctx.Warnf("Cannot write TLS chunked EOF from mitm'd client: %v", err)
+						return
+					}
+					if _, err = io.WriteString(rawClientTls, "\r\n"); err != nil {
+						ctx.Warnf("Cannot write TLS chunked trailer from mitm'd client: %v", err)
+						return
+					}
+				}
+			}
+			ctx.Logf("Exiting on EOF")
+		}()
 
 	}
 
