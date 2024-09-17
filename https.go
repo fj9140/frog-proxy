@@ -1,10 +1,15 @@
 package frogproxy
 
 import (
+	"bufio"
+	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync/atomic"
 )
 
@@ -18,11 +23,13 @@ const (
 )
 
 type ConnectAction struct {
-	Action ConnectActionLiteral
+	Action    ConnectActionLiteral
+	TLSConfig func(host string, ctx *ProxyCtx) (*tls.Config, error)
 }
 
 var (
-	OKConnect = &ConnectAction{}
+	OKConnect   = &ConnectAction{Action: ConnectAccept, TLSConfig: TLSConfigFromCA(&FrogproxyCa)}
+	MitmConnect = &ConnectAction{Action: ConnectMitm, TLSConfig: TLSConfigFromCA(&FrogproxyCa)}
 )
 
 func copyAndClose(ctx *ProxyCtx, dst, src halfClosable) {
@@ -110,4 +117,139 @@ func (proxy *ProxyHttpServer) handleHttps(w http.ResponseWriter, r *http.Request
 
 	}
 
+}
+
+func (proxy *ProxyHttpServer) NewConnectDialToProxy(https_proxy string) func(network, addr string) (net.Conn, error) {
+	return proxy.NewConnectDialToProxyWithHandler(https_proxy, nil)
+}
+
+func (proxy *ProxyHttpServer) NewConnectDialToProxyWithHandler(https_proxy string, connectReqHandler func(req *http.Request)) func(network, addr string) (net.Conn, error) {
+	u, err := url.Parse(https_proxy)
+	if err != nil {
+		return nil
+	}
+	if u.Scheme == "" || u.Scheme == "http" {
+		if !strings.ContainsRune(u.Host, ':') {
+			u.Host += ":80"
+		}
+		return func(network, addr string) (net.Conn, error) {
+			connectReq := &http.Request{
+				Method: "CONNECT",
+				URL:    &url.URL{Opaque: addr},
+				Host:   addr,
+				Header: make(http.Header),
+			}
+			if connectReqHandler != nil {
+				connectReqHandler(connectReq)
+			}
+			c, err := proxy.dial(network, u.Host)
+			if err != nil {
+				return nil, err
+			}
+			connectReq.Write(c)
+			br := bufio.NewReader(c)
+			resp, err := http.ReadResponse(br, connectReq)
+			if err != nil {
+				c.Close()
+				return nil, err
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				resp, err := io.ReadAll(resp.Body)
+				if err != nil {
+					return nil, err
+				}
+				c.Close()
+				return nil, errors.New("Proxy refused connection " + string(resp))
+			}
+			return c, nil
+		}
+	}
+	if u.Scheme == "https" || u.Scheme == "wss" {
+		if !strings.ContainsRune(u.Host, ':') {
+			u.Host += ":443"
+		}
+		return func(network, addr string) (net.Conn, error) {
+			connectReq := &http.Request{
+				Method: "CONNECT",
+				URL:    &url.URL{Opaque: addr},
+				Host:   addr,
+				Header: make(http.Header),
+			}
+			if connectReqHandler != nil {
+				connectReqHandler(connectReq)
+			}
+			c, err := proxy.dial(network, u.Host)
+			if err != nil {
+				return nil, err
+			}
+			connectReq.Write(c)
+			br := bufio.NewReader(c)
+			resp, err := http.ReadResponse(br, connectReq)
+			if err != nil {
+				c.Close()
+				return nil, err
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				resp, err := io.ReadAll(resp.Body)
+				if err != nil {
+					return nil, err
+				}
+				c.Close()
+				return nil, errors.New("Proxy refused connection " + string(resp))
+			}
+
+			return c, nil
+		}
+	}
+	return nil
+}
+
+func stripPort(s string) string {
+	var ix int
+	if strings.Contains(s, "[") && strings.Contains(s, "]") {
+		s = strings.ReplaceAll(s, "[", "]")
+		s = strings.ReplaceAll(s, "]", "")
+
+		ix = strings.LastIndexAny(s, ":")
+		if ix == -1 {
+			return s
+		}
+	} else {
+		ix = strings.IndexRune(s, ':')
+		if ix == -1 {
+			return s
+		}
+	}
+	return s[:ix]
+}
+
+func TLSConfigFromCA(ca *tls.Certificate) func(host string, ctx *ProxyCtx) (*tls.Config, error) {
+	return func(host string, ctx *ProxyCtx) (*tls.Config, error) {
+		var err error
+		var cert *tls.Certificate
+
+		hostname := stripPort(host)
+		config := defaultTLSConfig.Clone()
+		ctx.Logf("signing cert for %s", hostname)
+
+		genCert := func() (*tls.Certificate, error) {
+			return signHost(*ca, []string{hostname})
+		}
+		if ctx.certStore != nil {
+			cert, err = ctx.certStore.Fetch(hostname, genCert)
+		} else {
+			cert, err = genCert()
+		}
+
+		if err != nil {
+			ctx.Warnf("Cannot sign host certificate with provided CA: %s", err)
+			return nil, err
+		}
+
+		config.Certificates = append(config.Certificates, *cert)
+		return config, nil
+
+	}
 }

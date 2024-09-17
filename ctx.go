@@ -15,6 +15,7 @@ type ProxyCtx struct {
 	Session   int64
 	Proxy     *ProxyHttpServer
 	certStore CertStorage
+	Error     error
 }
 
 func (ctx *ProxyCtx) printf(msg string, argv ...interface{}) {
