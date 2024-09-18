@@ -77,7 +77,7 @@ func removeProxyHeaders(ctx *ProxyCtx, r *http.Request) {
 func (proxy *ProxyHttpServer) filterRequest(r *http.Request, ctx *ProxyCtx) (req *http.Request, resp *http.Response) {
 	req = r
 	for _, h := range proxy.reqHandlers {
-		req, resp = h.Handle(req, ctx)
+		req, resp = h.Handle(r, ctx)
 		if req != nil {
 			break
 		}
