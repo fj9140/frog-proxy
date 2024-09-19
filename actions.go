@@ -25,3 +25,9 @@ type FuncHttpsHandler func(host string, ctx *ProxyCtx) (*ConnectAction, string)
 func (f FuncHttpsHandler) HandleConnect(host string, ctx *ProxyCtx) (*ConnectAction, string) {
 	return f(host, ctx)
 }
+
+type FuncRespHandler func(resp *http.Response, ctx *ProxyCtx) *http.Response
+
+func (f FuncRespHandler) Handle(resp *http.Response, ctx *ProxyCtx) *http.Response {
+	return f(resp, ctx)
+}

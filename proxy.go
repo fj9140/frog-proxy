@@ -23,6 +23,7 @@ type ProxyHttpServer struct {
 	Tr                     *http.Transport
 	reqHandlers            []ReqHandler
 	respHandlers           []RespHandler
+	KeepHeader             bool
 }
 
 type flushWriter struct {
@@ -107,7 +108,17 @@ func (proxy *ProxyHttpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		r, resp := proxy.filterRequest(r, ctx)
 
 		if resp == nil {
-
+			if !proxy.KeepHeader {
+				removeProxyHeaders(ctx, r)
+			}
+			resp, err = ctx.RoundTrip(r)
+			if err != nil {
+				ctx.Error = err
+				resp = proxy.filterResponse(nil, ctx)
+			}
+			if resp != nil {
+				ctx.Logf("Received response %v", resp.Status)
+			}
 		}
 
 		var origBody io.ReadCloser

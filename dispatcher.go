@@ -18,6 +18,33 @@ type ReqProxyConds struct {
 
 type ReqConditionFunc func(req *http.Request, ctx *ProxyCtx) bool
 
+type ProxyConds struct {
+	proxy     *ProxyHttpServer
+	reqConds  []ReqCondition
+	respConds []RespCondition
+}
+
+func (pcond *ProxyConds) Do(h RespHandler) {
+	pcond.proxy.respHandlers = append(pcond.proxy.respHandlers,
+		FuncRespHandler(func(resp *http.Response, ctx *ProxyCtx) *http.Response {
+			for _, cond := range pcond.reqConds {
+				if !cond.HandleReq(ctx.Req, ctx) {
+					return resp
+				}
+			}
+			for _, cond := range pcond.respConds {
+				if !cond.HandleResp(resp, ctx) {
+					return resp
+				}
+			}
+			return h.Handle(resp, ctx)
+		}))
+}
+
+func (pcond *ProxyConds) DoFunc(f func(resp *http.Response, ctx *ProxyCtx) *http.Response) {
+	pcond.Do(FuncRespHandler(f))
+}
+
 func (c ReqConditionFunc) HandleReq(req *http.Request, ctx *ProxyCtx) bool {
 	return c(req, ctx)
 }
@@ -53,6 +80,10 @@ func (pcond *ReqProxyConds) HandleConnect(h HttpsHandler) {
 
 func (proxy *ProxyHttpServer) OnRequest(conds ...ReqCondition) *ReqProxyConds {
 	return &ReqProxyConds{proxy, conds}
+}
+
+func (proxy *ProxyHttpServer) OnResponse(conds ...RespCondition) *ProxyConds {
+	return &ProxyConds{proxy, make([]ReqCondition, 0), conds}
 }
 
 func DstHostIs(host string) ReqConditionFunc {

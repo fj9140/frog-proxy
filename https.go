@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 )
 
@@ -41,6 +42,13 @@ func copyAndClose(ctx *ProxyCtx, dst, src halfClosable) {
 	}
 	dst.CloseWrite()
 	src.CloseWrite()
+}
+
+func copyOrWarn(ctx *ProxyCtx, dst io.Writer, src io.Reader, wg *sync.WaitGroup) {
+	if _, err := io.Copy(dst, src); err != nil {
+		ctx.Warnf("Error copying to client: %s", err)
+	}
+	wg.Done()
 }
 
 func httpError(w io.WriteCloser, ctx *ProxyCtx, err error) {
@@ -122,6 +130,15 @@ func (proxy *ProxyHttpServer) handleHttps(w http.ResponseWriter, r *http.Request
 			go copyAndClose(ctx, targetTCP, proxyClientTCP)
 			go copyAndClose(ctx, proxyClientTCP, targetTCP)
 		} else {
+			go func() {
+				var wg sync.WaitGroup
+				wg.Add(2)
+				go copyOrWarn(ctx, targetSiteCon, proxyClient, &wg)
+				go copyOrWarn(ctx, proxyClient, targetSiteCon, &wg)
+				wg.Wait()
+				proxyClient.Close()
+				targetSiteCon.Close()
+			}()
 		}
 	case ConnectMitm:
 		proxyClient.Write([]byte("HTTP/1.1 200 OK\r\n\r\n"))
